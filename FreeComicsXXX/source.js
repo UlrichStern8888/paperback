@@ -18939,18 +18939,60 @@ const types_1 = require("@paperback/types");
 const helper_1 = require("../templates/helper");
 const DOMAIN = 'https://www.freecomics.xxx';
 exports.FreeComicsXXXInfo = {
-    version: '1.0', language: 'EN', name: 'FreeComics.XXX', icon: 'icon.png',
+    version: '1.3', language: 'EN', name: 'FreeComics.XXX', icon: 'icon.png',
     description: 'Comics adultes avec séries, chapitres et lecteur complet.', author: 'UlrichStern',
     contentRating: types_1.ContentRating.ADULT, websiteBaseURL: `${DOMAIN}/main1.html`,
     sourceTags: [{ text: 'EN', type: types_1.BadgeColor.GREY }],
-    intents: types_1.SourceIntents.MANGA_CHAPTERS | types_1.SourceIntents.HOMEPAGE_SECTIONS
+    intents: types_1.SourceIntents.MANGA_CHAPTERS | types_1.SourceIntents.HOMEPAGE_SECTIONS | types_1.SourceIntents.CLOUDFLARE_BYPASS_REQUIRED
 };
+function cleanText(value) {
+    let decoded = value ?? '';
+    for (let pass = 0; pass < 3; pass++) {
+        const previous = decoded;
+        decoded = decoded
+            .replace(/&amp;/gi, '&')
+            .replace(/&#x([0-9a-f]+);?/gi, (_, hex) => {
+            const codePoint = parseInt(hex, 16);
+            return Number.isFinite(codePoint) && codePoint <= 0x10FFFF ? String.fromCodePoint(codePoint) : '';
+        })
+            .replace(/&#(\d+);?/g, (_, decimal) => {
+            const codePoint = parseInt(decimal, 10);
+            return Number.isFinite(codePoint) && codePoint <= 0x10FFFF ? String.fromCodePoint(codePoint) : '';
+        })
+            .replace(/&quot;/gi, '"')
+            .replace(/&apos;|&#39;/gi, "'")
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&nbsp;/gi, ' ');
+        if (decoded === previous)
+            break;
+    }
+    return decoded.replace(/[\s\u00A0]+/g, ' ').trim();
+}
+function destinationUrl(href) {
+    const tracked = href.match(/[?&]url=([^&]+)/)?.[1];
+    if (!tracked)
+        return href;
+    try {
+        return decodeURIComponent(tracked);
+    }
+    catch {
+        return tracked;
+    }
+}
+function routeSlug(href, type) {
+    return destinationUrl(href).match(new RegExp(`/${type}-(.+?)-page-\\d+\\.html`, 'i'))?.[1]?.toLowerCase() ?? '';
+}
 class FreeComicsXXX {
     cheerio;
     constructor(cheerio) {
         this.cheerio = cheerio;
     }
     requestManager = App.createRequestManager({ requestsPerSecond: 3, requestTimeout: 30000 });
+    coverCache = new Map();
+    async getCloudflareBypassRequestAsync() {
+        return App.createRequest({ url: `${DOMAIN}/main1.html`, method: 'GET' });
+    }
     async load(path) {
         const response = await this.requestManager.schedule(App.createRequest({ url: path.startsWith('http') ? path : `${DOMAIN}${path}`, method: 'GET', headers: { Referer: `${DOMAIN}/main1.html` } }), 2);
         if (response.status < 200 || response.status >= 400)
@@ -18967,6 +19009,33 @@ class FreeComicsXXX {
         return item.kind === 'series' ? `/series-${item.value}-page-1.html` : `/books/${item.value}.html`;
     }
     getMangaShareUrl(mangaId) { return `${DOMAIN}${this.route(mangaId)}`; }
+    rememberCover(mangaId, image) {
+        if (!image)
+            return image;
+        if (this.coverCache.size >= 500)
+            this.coverCache.delete(this.coverCache.keys().next().value ?? '');
+        this.coverCache.set(mangaId, image);
+        return image;
+    }
+    cardFacets($, card) {
+        const genres = $('a[href*="genre-"]', card).map((_, element) => routeSlug($(element).attr('href') ?? '', 'genre')).get().filter(Boolean);
+        const artists = $('a[href*="artist-"]', card).map((_, element) => routeSlug($(element).attr('href') ?? '', 'artist')).get().filter(Boolean);
+        return { genres, artists };
+    }
+    cardMatches($, card, query) {
+        if (!query)
+            return true;
+        const text = cleanText($(card).text()).toLowerCase();
+        if (query.title?.trim() && !text.includes(cleanText(query.title).toLowerCase()))
+            return false;
+        const facets = this.cardFacets($, card);
+        const included = (query.includedTags ?? []).map(tag => tag.id);
+        const excluded = (query.excludedTags ?? []).map(tag => tag.id);
+        const facetMatches = (id, whenMissing) => id.startsWith('genre=')
+            ? (facets.genres.length === 0 ? whenMissing : facets.genres.includes(id.slice(6).toLowerCase()))
+            : id.startsWith('artist=') && (facets.artists.length === 0 ? whenMissing : facets.artists.includes(id.slice(7).toLowerCase()));
+        return included.every(id => facetMatches(id, true)) && !excluded.some(id => facetMatches(id, false));
+    }
     cardToManga($, card) {
         const main = $('a[href*="/books/"]', card).first();
         const bookUrl = main.attr('href') ?? main.attr('title') ?? '';
@@ -18977,49 +19046,69 @@ class FreeComicsXXX {
         const series = seriesUrl.match(/\/series-(.+)-page-\d+\.html/)?.[1];
         const mangaId = series ? `series--${series}` : `book--${bookId}`;
         const img = $('img', main).first();
-        const rawTitle = main.attr('title') || img.attr('alt') || $('.bookinfo', card).first().text();
-        const title = series ? $('.bookinfo', card).first().clone().children().remove().end().text().replace(/\s+by\s*$/i, '').trim() || rawTitle.replace(/\s*\(Chapter.*$/i, '') : rawTitle.replace(/\s*\(Chapter.*$/i, '');
+        const rawTitle = cleanText(main.attr('title') || img.attr('alt') || $('.bookinfo', card).first().text());
+        const cardSeriesTitle = cleanText($('.bookinfo', card).first().clone().children().remove().end().text()).replace(/\s+by\s*$/i, '').trim();
+        const title = cleanText(series ? cardSeriesTitle || rawTitle.replace(/\s*\(Chapter.*$/i, '') : rawTitle.replace(/\s*\(Chapter.*$/i, ''));
         const image = (0, helper_1.getImageUrl)($, img);
         if (!title || !image)
             return undefined;
-        return App.createPartialSourceManga({ mangaId, title, image, subtitle: $('.bookinfo', card).eq(1).text().trim() });
+        this.rememberCover(mangaId, image);
+        return App.createPartialSourceManga({ mangaId, title, image, subtitle: cleanText($('.bookinfo', card).eq(1).text()) });
     }
     async getMangaDetails(mangaId) {
         const $ = await this.load(this.route(mangaId));
         const identity = this.identity(mangaId);
         const firstCard = $('.xcpreview').first();
-        const title = identity.kind === 'series'
+        const title = cleanText(identity.kind === 'series'
             ? ($('.xheadtitle').clone().children().remove().end().text().replace(/^📚\s*/, '').trim() || $('h1').first().text().trim())
-            : ($('title').text().replace(/\s*-\s*FreeComics.*$/i, '').replace(/\s*\(Chapter.*$/i, '').trim());
-        const image = identity.kind === 'series' ? (0, helper_1.getImageUrl)($, $('img', firstCard).first()) : ($('meta[property="og:image"]').attr('content') ?? (0, helper_1.getImageUrl)($, $('.ximg').first()));
-        const artist = $('.xheadtitle a[href*="artist-"]').first().text().trim() || $('a[href*="artist-"]').first().text().trim() || 'N/A';
-        const genres = $('a[href*="genre-"]').map((_, e) => $(e).text().trim()).get().filter(Boolean);
+            : ($('title').text().replace(/\s*-\s*FreeComics.*$/i, '').replace(/\s*\(Chapter.*$/i, '').trim()));
+        let image = this.coverCache.get(mangaId) ?? '';
+        if (!image && identity.kind === 'series')
+            image = (0, helper_1.getImageUrl)($, $('img', firstCard).first());
+        if (!image && identity.kind === 'book') {
+            const search = await this.load(`/?search=${encodeURIComponent(title)}`);
+            const matchingCard = search('.xcpreview').filter((_, card) => {
+                const href = search('a[href*="/books/"]', card).first().attr('href') ?? '';
+                return destinationUrl(href).includes(`/books/${identity.value}.html`);
+            }).first();
+            image = (0, helper_1.getImageUrl)(search, search('img', matchingCard).first());
+        }
+        if (!image)
+            image = $('meta[property="og:image"]').attr('content') ?? (0, helper_1.getImageUrl)($, $('.ximg').first());
+        image = this.rememberCover(mangaId, image);
+        const artist = cleanText($('.xheadtitle a[href*="artist-"]').first().text() || $('a[href*="artist-"]').first().text()) || 'N/A';
+        const genres = $('a[href*="genre-"]').map((_, e) => cleanText($(e).text()).replace(/^📚\s*/, '')).get().filter(Boolean);
         const tags = App.createTagSection({ id: 'genres', label: 'Genres', tags: Array.from(new Set(genres)).map(label => App.createTag({ id: label, label })) });
         return App.createSourceManga({ id: mangaId, mangaInfo: App.createMangaInfo({
-                image, titles: [title], desc: $('meta[property="og:description"]').attr('content') ?? '', author: artist, artist,
+                image, titles: [title], desc: cleanText($('meta[property="og:description"]').attr('content')), author: artist, artist,
                 status: identity.kind === 'series' ? 'En cours' : 'Terminé', hentai: true, tags: [tags], additionalInfo: { viewer: 'webtoon' }
             }) });
     }
     async getChapters(mangaId) {
         const identity = this.identity(mangaId);
-        const $ = await this.load(this.route(mangaId));
-        if (identity.kind === 'book') {
-            const name = $('.dropbtn').first().text().replace(/^📖\s*/, '').trim() || 'Chapter 1';
-            const number = Number(name.match(/\d+(?:\.\d+)?/)?.[0] ?? 1);
-            return [App.createChapter({ id: identity.value, name, langCode: 'EN', chapNum: number, volume: 0, time: new Date(0) })];
+        let $ = await this.load(this.route(mangaId));
+        if (identity.kind === 'series') {
+            const firstBookHref = $('.xcpreview a[href*="/books/"]').first().attr('href') ?? '';
+            const firstBookId = destinationUrl(firstBookHref).match(/\/books\/(\d+)\.html/)?.[1];
+            if (firstBookId)
+                $ = await this.load(`/books/${firstBookId}.html`);
         }
-        const chapters = new Map();
-        $('.xcpreview').each((_, card) => {
-            const href = $('a[href*="/books/"]', card).first().attr('href') ?? '';
-            const id = href.match(/\/books\/(\d+)\.html/)?.[1];
-            if (!id)
-                return;
-            const label = $('.bookinfo', card).eq(1).text().trim() || $('a[href*="/books/"]', card).first().attr('title')?.match(/\((Chapter[^)]+)\)/i)?.[1] || `Chapter ${id}`;
-            const number = Number(label.match(/\d+(?:\.\d+)?/)?.[0] ?? chapters.size + 1);
-            const date = $('.xdate', card).text().trim();
-            chapters.set(id, App.createChapter({ id, name: label, langCode: 'EN', chapNum: number, volume: 0, time: date ? new Date(date) : new Date(0) }));
+        const chapterIds = [];
+        $('.dropdown-content a[href*="/books/"]').each((_, link) => {
+            const id = destinationUrl($(link).attr('href') ?? '').match(/\/books\/(\d+)\.html/)?.[1];
+            if (id && !chapterIds.includes(id))
+                chapterIds.push(id);
         });
-        return [...chapters.values()].sort((a, b) => b.chapNum - a.chapNum);
+        if (!chapterIds.length && identity.kind === 'book')
+            chapterIds.push(identity.value);
+        return chapterIds.map((id, index) => App.createChapter({
+            id,
+            name: `Chapter ${index + 1}`,
+            langCode: 'EN',
+            chapNum: index + 1,
+            volume: 0,
+            time: new Date(0)
+        })).reverse();
     }
     async getChapterDetails(mangaId, chapterId) {
         const $ = await this.load(`/books/${chapterId}.html`);
@@ -19028,28 +19117,57 @@ class FreeComicsXXX {
             throw new Error(`FreeComics.XXX: aucune page pour ${chapterId}`);
         return App.createChapterDetails({ id: chapterId, mangaId, pages: Array.from(new Set(pages)) });
     }
-    parseCards($) {
+    parseCards($, query) {
         const map = new Map();
-        $('.xcpreview').each((_, card) => { const item = this.cardToManga($, card); if (item)
-            map.set(item.mangaId, item); });
+        $('.xcpreview').each((_, card) => {
+            if (!this.cardMatches($, card, query))
+                return;
+            const item = this.cardToManga($, card);
+            if (item)
+                map.set(item.mangaId, item);
+        });
         return [...map.values()];
     }
     async getSearchResults(query, metadata) {
         const page = metadata?.page ?? 1;
-        const genre = (query.includedTags ?? []).find(tag => tag.id.startsWith('genre='))?.id.slice(6);
+        const included = (query.includedTags ?? []).map(tag => tag.id);
+        const genre = included.find(id => id.startsWith('genre='))?.slice(6);
+        const artist = included.find(id => id.startsWith('artist='))?.slice(7);
         let path;
         if (query.title?.trim())
             path = `/?search=${encodeURIComponent(query.title.trim())}`;
+        else if (artist)
+            path = `/artist-${artist}-page-${page}.html`;
         else if (genre)
             path = `/genre-${genre}-page-${page}.html`;
         else
             path = `/new-porn-${page}.html`;
-        const results = this.parseCards(await this.load(path));
+        const results = this.parseCards(await this.load(path), query);
         return App.createPagedResults({ results, metadata: results.length >= 20 && !query.title?.trim() ? { page: page + 1 } : undefined });
     }
     async getSearchTags() {
-        const genres = ['western', 'hentai', '3d', 'cartoon', 'webtoon', 'full-color', 'romance', 'fantasy', 'comedy', 'futanari', 'bdsm', 'harem'];
-        return [App.createTagSection({ id: 'genres', label: 'Genres', tags: genres.map(id => App.createTag({ id: `genre=${id}`, label: id.replace(/-/g, ' ') })) })];
+        const $ = await this.load('/main1.html');
+        const genres = new Map();
+        $('.xcpreview a').each((_, link) => {
+            const href = $(link).attr('href') ?? '';
+            const slug = routeSlug(href, 'genre');
+            const label = cleanText($('.xcpin', link).text() || $(link).text()).replace(/^📚\s*/, '');
+            if (slug && label)
+                genres.set(slug, label);
+        });
+        const artists = new Map();
+        $('a[href*="/artist-"][href*="-page-1.html"]').each((_, link) => {
+            const href = $(link).attr('href') ?? '';
+            const slug = routeSlug(href, 'artist');
+            const label = cleanText($(link).text()).replace(/^🎨\s*/, '').replace(/\s*•\s*\d+\s*$/, '');
+            if (slug && label && !artists.has(slug))
+                artists.set(slug, label);
+        });
+        const byLabel = (a, b) => a[1].localeCompare(b[1], 'en', { sensitivity: 'base' });
+        return [
+            App.createTagSection({ id: 'genres', label: `Genres (${genres.size})`, tags: [...genres].sort(byLabel).map(([id, label]) => App.createTag({ id: `genre=${id}`, label })) }),
+            App.createTagSection({ id: 'artists', label: `Artists (${artists.size})`, tags: [...artists].sort(byLabel).map(([id, label]) => App.createTag({ id: `artist=${id}`, label })) })
+        ];
     }
     async getHomePageSections(callback) {
         const definitions = [
