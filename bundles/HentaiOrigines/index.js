@@ -18939,7 +18939,7 @@ const types_1 = require("@paperback/types");
 const base_1 = require("../templates/madara/base");
 const DOMAIN = 'https://hentai-origines.com';
 exports.HentaiOriginesInfo = {
-    version: "3.2",
+    version: "3.3",
     language: "FR",
     name: 'HentaiOrigines',
     icon: 'icon.png',
@@ -19278,7 +19278,8 @@ class Madara {
         const manga = (0, parser_1.parseSearchResults)($, this);
         const signature = manga.map(item => item.mangaId).join('|');
         const repeatedPage = Boolean(signature && signature === metadata?.signature);
-        metadata = !repeatedPage && manga.length >= 24 ? { page: page + 1, signature } : undefined;
+        const hasNextPage = $('a.nextpostslink, a.next.page-numbers, .pagination a.next, link[rel="next"]').length > 0;
+        metadata = !repeatedPage && manga.length > 0 && hasNextPage ? { page: page + 1, signature } : undefined;
         return App.createPagedResults({
             results: repeatedPage ? [] : manga,
             metadata
@@ -19355,9 +19356,10 @@ class Madara {
         const results = (0, parser_1.parseSearchResults)($, this);
         const signature = results.map(item => item.mangaId).join('|');
         const repeatedPage = Boolean(signature && signature === metadata?.signature);
+        const hasNextPage = $('a.nextpostslink, a.next.page-numbers, .pagination a.next, link[rel="next"]').length > 0;
         return App.createPagedResults({
             results: repeatedPage ? [] : results,
-            metadata: !repeatedPage && results.length >= 24 ? { page: page + 1, signature } : undefined
+            metadata: !repeatedPage && results.length > 0 && hasNextPage ? { page: page + 1, signature } : undefined
         });
     }
     /////////////////////////////////////////////////////

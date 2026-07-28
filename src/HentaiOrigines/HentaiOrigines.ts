@@ -13,7 +13,7 @@ const DOMAIN: string = 'https://hentai-origines.com'
 
 
 export const HentaiOriginesInfo: SourceInfo = {
-    version: "3.2",
+    version: "3.3",
     language: "FR",
     name: 'HentaiOrigines',
     icon: 'icon.png',

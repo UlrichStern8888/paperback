@@ -4,7 +4,7 @@ import { Madara } from '../templates/madara/base'
 const DOMAIN = 'https://hentai.scantrad-vf.cc'
 
 export const HentaiScantradVFInfo: SourceInfo = {
-    version: '1.0',
+    version: '1.2',
     language: 'FR',
     name: 'Hentai Scantrad VF',
     icon: 'icon.png',

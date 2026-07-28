@@ -9,27 +9,29 @@ Dépôt de sources Paperback orienté lecture adulte. Toutes les sources compile
 | Source | Langue | Périmètre | Recherche | Accueil | Chapitres / pages |
 | :-- | :--: | :-- | :--: | :--: | :--: |
 | HentaiOrigines | FR | Site complet | Avancée | 4 sections | Oui |
-| ScansFR NSFW | FR | **Uniquement `/nsfw`** | Titre, genre, statut, tri | 4 sections | Oui, jetons d’images inclus |
-| OrtegaScans | FR | Site complet | Titre, genre, statut | 3 sections | Oui, séries complètes |
-| Hentai Scantrad VF | FR | Site complet | Avancée Madara | 4 sections | Oui, bypass Cloudflare |
-| FreeComics.XXX | EN | `main1.html` et catalogue | Titre, genre | 5 sections | Oui, regroupement par série |
+| ScansFR NSFW | FR | **Uniquement `/nsfw`** | Titre, type, genre, statut, chapitres, tri | 4 sections | Oui, jetons d’images inclus |
+| OrtegaScans | FR | Site complet | API complète, genres, statut, chapitres, catalogue, tri | 3 sections | Oui, séries complètes |
+| Hentai Scantrad VF | FR | Site complet | Avancée Madara et pagination progressive | 4 sections | Oui, bypass Cloudflare |
+| FreeComics.XXX | EN | `main1.html` et catalogue | Titre, 114 genres dynamiques, artistes | 5 sections | Oui, regroupement par série |
 
 ## Points importants
 
 - ScansFR refuse toute fiche ou tout chapitre dont l’API ne confirme pas `isNsfw: true`. Les URLs Paperback restent sous `/nsfw` et le cookie de la barrière adulte est fourni par la source.
 - Le lecteur ScansFR récupère un jeton de chapitre éphémère puis construit toutes les URLs signées des pages.
-- OrtegaScans lit les données serveur Next.js et exclut les chapitres Premium encore verrouillés.
-- FreeComics.XXX regroupe les livres partageant une page `series-*` en une seule série Paperback ; chaque livre devient un chapitre et toutes les images `cdn.freecomics.xxx/galleries/` sont rendues dans l’ordre.
-- Hentai Scantrad VF déclare le bypass Cloudflare requis par Paperback.
+- OrtegaScans utilise l’API paginée du site au lieu des seules cartes SSR et exclut les chapitres Premium encore verrouillés.
+- FreeComics.XXX regroupe les livres partageant une page `series-*` en une seule série Paperback. La liste canonique des livres vient du menu `.dropdown-content`, puis les chapitres sont renumérotés proprement. Les entités HTML, y compris les formes doublement encodées `&amp;#x…;`, sont décodées.
+- Les couvertures FreeComics sont conservées entre la liste et la fiche. Pour un livre ouvert directement, la source retrouve sa miniature dans la recherche du site avant d'utiliser la première page du lecteur en dernier recours.
+- Les cinq sources déclarent le bypass Cloudflare : le bouton nuage reste disponible dans Paperback même lorsqu'une protection apparaît temporairement.
 
 ## Recherche
 
 La recherche standard de Paperback correspond au champ titre du site. Les filtres supplémentaires sont exposés quand le site les fournit :
 
 - HentaiOrigines : auteur, artiste, année, genres avec condition OU/ET, statut, contenu adulte et tris officiels.
-- ScansFR NSFW : genres adultes, statut, dernière mise à jour, ordre alphabétique, popularité et note.
-- OrtegaScans : genres principaux et statut, avec filtrage local du catalogue complet rendu par le site.
-- FreeComics.XXX : recherche texte native et navigation par genres.
+- ScansFR NSFW : 4 types, genres dynamiques, 4 statuts, chapitres minimum et les 5 tris officiels. Les pages sont chargées progressivement par lots de 24.
+- OrtegaScans : catalogue API complet, 30 genres dynamiques actuellement, 4 statuts, chapitres minimum, séries Ortega uniquement et les tris Popularité, Ordre alphabétique et Plus récent. Les résultats sont chargés progressivement par lots de 18.
+- Hentai Scantrad VF : filtres Madara complets et chargement progressif tant que le site expose une page suivante, quelle que soit la taille de la page.
+- FreeComics.XXX : recherche texte native, tous les genres de `main1.html`, liste dynamique des artistes, filtres inclus/exclus et pagination par artiste ou genre.
 
 ## Page d’accueil Paperback
 

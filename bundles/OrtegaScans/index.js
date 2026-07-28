@@ -18939,11 +18939,11 @@ const types_1 = require("@paperback/types");
 const helper_1 = require("../templates/helper");
 const DOMAIN = 'https://ortegascans.fr';
 exports.OrtegaScansInfo = {
-    version: '1.0', language: 'FR', name: 'OrtegaScans', icon: 'icon.png',
+    version: '1.2', language: 'FR', name: 'OrtegaScans', icon: 'icon.png',
     description: 'Pornhwa et hentai en français depuis OrtegaScans.', author: 'UlrichStern',
     contentRating: types_1.ContentRating.ADULT, websiteBaseURL: DOMAIN,
     sourceTags: [{ text: 'FR', type: types_1.BadgeColor.GREY }],
-    intents: types_1.SourceIntents.MANGA_CHAPTERS | types_1.SourceIntents.HOMEPAGE_SECTIONS
+    intents: types_1.SourceIntents.MANGA_CHAPTERS | types_1.SourceIntents.HOMEPAGE_SECTIONS | types_1.SourceIntents.CLOUDFLARE_BYPASS_REQUIRED
 };
 class OrtegaScans {
     cheerio;
@@ -18951,6 +18951,9 @@ class OrtegaScans {
         this.cheerio = cheerio;
     }
     requestManager = App.createRequestManager({ requestsPerSecond: 4, requestTimeout: 30000 });
+    async getCloudflareBypassRequestAsync() {
+        return App.createRequest({ url: DOMAIN, method: 'GET' });
+    }
     async load(path) {
         const response = await this.requestManager.schedule(App.createRequest({ url: `${DOMAIN}${path}`, method: 'GET' }), 2);
         if (response.status < 200 || response.status >= 400)
@@ -18962,6 +18965,32 @@ class OrtegaScans {
         if (response.status < 200 || response.status >= 400)
             throw new Error(`OrtegaScans: erreur HTTP ${response.status}`);
         return String(response.data);
+    }
+    async getSeriesPage(parameters) {
+        const query = Object.entries(parameters)
+            .filter(([, value]) => value !== undefined && String(value).trim() !== '')
+            .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+            .join('&');
+        const response = await this.requestManager.schedule(App.createRequest({ url: `${DOMAIN}/api/series?${query}`, method: 'GET' }), 2);
+        if (response.status < 200 || response.status >= 400)
+            throw new Error(`OrtegaScans API: erreur HTTP ${response.status}`);
+        const payload = JSON.parse(String(response.data));
+        if (!payload.success || !Array.isArray(payload.data))
+            throw new Error('OrtegaScans API: réponse invalide');
+        return payload;
+    }
+    seriesToManga(series) {
+        const details = [
+            series.status,
+            ...(series.categories ?? []).map(category => category.name),
+            `${series._count?.chapters ?? 0} chapitres`
+        ].filter(Boolean).join(' • ');
+        return App.createPartialSourceManga({
+            mangaId: series.slug,
+            title: series.title,
+            image: `${DOMAIN}/api/covers/${encodeURIComponent(series.slug)}.webp`,
+            subtitle: details
+        });
     }
     getMangaShareUrl(mangaId) { return `${DOMAIN}/serie/${mangaId}`; }
     async getMangaDetails(mangaId) {
@@ -19032,24 +19061,48 @@ class OrtegaScans {
         });
         return [...map.values()];
     }
-    async getSearchResults(query) {
-        const $ = await this.load('/series');
-        let results = this.parseSeries($, query.title ?? '');
+    async getSearchResults(query, metadata) {
+        const page = metadata?.page ?? 1;
         const included = (query.includedTags ?? []).map(tag => tag.id);
-        const genre = included.find(id => id.startsWith('genre='))?.slice(6).toLowerCase();
-        const status = included.find(id => id.startsWith('status='))?.slice(7).toLowerCase();
-        if (genre || status)
-            results = results.filter(item => {
-                const card = $(`a[href="/serie/${item.mangaId}"]`).text().toLowerCase();
-                return (!genre || card.includes(genre)) && (!status || card.includes(status));
-            });
-        return App.createPagedResults({ results });
+        const genres = included.filter(id => id.startsWith('genre=')).map(id => id.slice(6));
+        const status = included.find(id => id.startsWith('status='))?.slice(7);
+        const sort = included.find(id => id.startsWith('sort='))?.slice(5) ?? 'popular';
+        const minChapters = included.find(id => id.startsWith('minChapters='))?.slice(12) ?? '0';
+        const isOrtegaOnly = included.includes('catalog=ortega');
+        const payload = await this.getSeriesPage({
+            limit: 18,
+            page,
+            search: query.title?.trim(),
+            tags: genres.join(','),
+            status,
+            sort,
+            minChapters,
+            isOrtegaOnly,
+            unreadOnly: false
+        });
+        const results = payload.data.map(series => this.seriesToManga(series));
+        const signature = results.map(item => item.mangaId).join('|');
+        const repeatedPage = Boolean(signature && signature === metadata?.signature);
+        return App.createPagedResults({
+            results: repeatedPage ? [] : results,
+            metadata: !repeatedPage && results.length > 0 && payload.hasMore ? { page: page + 1, signature } : undefined
+        });
     }
     async getSearchTags() {
-        const genres = ['Harem', 'Romance', 'Drame', 'Mature', 'MILF', 'Fantaisie', 'Comédie', 'Vie Scolaire', 'Système', 'Revanche'];
+        const catalog = await this.getSeriesPage({ limit: 1000, page: 1, sort: 'popular', minChapters: 0, isOrtegaOnly: false, unreadOnly: false });
+        const genres = Array.from(new Set(catalog.data.flatMap(series => (series.categories ?? []).map(category => category.name))))
+            .sort((a, b) => a.localeCompare(b, 'fr', { sensitivity: 'base' }));
+        const statuses = [['en cours', 'En cours'], ['terminé', 'Terminé'], ['en pause', 'En pause'], ['annulé', 'Annulé']];
         return [
             App.createTagSection({ id: 'genres', label: 'Genres', tags: genres.map(label => App.createTag({ id: `genre=${label}`, label })) }),
-            App.createTagSection({ id: 'status', label: 'Statut', tags: ['En cours', 'Terminé'].map(label => App.createTag({ id: `status=${label}`, label })) })
+            App.createTagSection({ id: 'status', label: 'Statut', tags: statuses.map(([value, label]) => App.createTag({ id: `status=${value}`, label })) }),
+            App.createTagSection({ id: 'sort', label: 'Tri', tags: [
+                    App.createTag({ id: 'sort=popular', label: 'Popularité' }),
+                    App.createTag({ id: 'sort=alpha', label: 'Ordre alphabétique' }),
+                    App.createTag({ id: 'sort=recent', label: 'Plus récent' })
+                ] }),
+            App.createTagSection({ id: 'chapters', label: 'Nombre de chapitres', tags: [1, 25, 50, 100, 150, 200].map(value => App.createTag({ id: `minChapters=${value}`, label: `${value}+ chapitres` })) }),
+            App.createTagSection({ id: 'catalog', label: 'Catalogue', tags: [App.createTag({ id: 'catalog=ortega', label: 'Séries Ortega uniquement' })] })
         ];
     }
     async getHomePageSections(callback) {
@@ -19063,19 +19116,14 @@ class OrtegaScans {
         for (const definition of definitions) {
             if (!definition.items.length)
                 continue;
-            const section = App.createHomeSection({ id: definition.id, title: definition.title, type: types_1.HomeSectionType.singleRowNormal, containsMoreItems: definition.id !== 'new' });
+            const section = App.createHomeSection({ id: definition.id, title: definition.title, type: types_1.HomeSectionType.singleRowNormal, containsMoreItems: true });
             section.items = definition.items;
             callback(section);
         }
     }
-    async getViewMoreItems(id) {
-        if (id === 'latest' || id === 'new') {
-            const $ = await this.load('/');
-            const match = id === 'latest' ? /Dernières sorties/i : /Nouvelles séries/i;
-            const scope = $('section').filter((_, e) => match.test($('h1,h2', e).first().text())).first();
-            return App.createPagedResults({ results: this.parseSeries($, '', scope) });
-        }
-        return this.getSearchResults({ title: '', includedTags: [], excludedTags: [], parameters: {} });
+    async getViewMoreItems(id, metadata) {
+        const sort = id === 'popular' ? 'popular' : 'recent';
+        return this.getSearchResults({ title: '', includedTags: [{ id: `sort=${sort}`, label: sort }], excludedTags: [], parameters: {} }, metadata);
     }
 }
 exports.OrtegaScans = OrtegaScans;

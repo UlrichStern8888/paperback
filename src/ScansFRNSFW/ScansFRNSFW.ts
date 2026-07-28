@@ -18,7 +18,7 @@ interface ChapterJson { id: string; pageCount: number; mangaIsNsfw: boolean }
 interface TokenJson { sig: string; exp: number; sessionHash: string; chapterId: string; pageCount: number }
 
 export const ScansFRNSFWInfo: SourceInfo = {
-    version: '1.0', language: 'FR', name: 'ScansFR NSFW', icon: 'icon.png',
+    version: '1.2', language: 'FR', name: 'ScansFR NSFW', icon: 'icon.png',
     description: 'Catalogue ScansFR limité strictement à /nsfw.', author: 'UlrichStern',
     contentRating: ContentRating.ADULT, websiteBaseURL: `${DOMAIN}/nsfw`,
     sourceTags: [{ text: 'NSFW FR', type: BadgeColor.GREY }],
@@ -91,26 +91,47 @@ export class ScansFRNSFW implements MangaProviding, ChapterProviding, SearchResu
 
     async getSearchResults(query: SearchRequest, metadata: any): Promise<PagedResults> {
         const page = metadata?.page ?? 1
-        const params = new URLSearchParams({ page: String(page) })
-        if (query.title?.trim()) params.set('search', query.title.trim())
+        const params: string[] = []
+        const addParam = (key: string, value: string | number | undefined) => {
+            if (value === undefined || String(value).trim() === '') return
+            params.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+        }
+        addParam('page', page)
+        addParam('limit', 24)
+        addParam('search', query.title?.trim())
         for (const tag of query.includedTags ?? []) {
             const split = tag.id.indexOf('=')
-            if (split > 0) params.set(tag.id.slice(0, split), tag.id.slice(split + 1))
+            if (split > 0) addParam(tag.id.slice(0, split), tag.id.slice(split + 1))
         }
-        const $ = await this.html(`/nsfw/catalog?${params.toString()}`)
+        const $ = await this.html(`/nsfw/catalog?${params.join('&')}`)
         const results = this.parseCatalog($)
-        return App.createPagedResults({ results, metadata: results.length >= 20 ? { page: page + 1 } : undefined })
+        const signature = results.map(item => item.mangaId).join('|')
+        const repeatedPage = Boolean(signature && signature === metadata?.signature)
+        const nextButton = $('button').filter((_, element) => $(element).text().trim() === 'Suivant').first()
+        const hasNextPage = nextButton.length > 0 ? nextButton.attr('disabled') === undefined : results.length >= 24
+        return App.createPagedResults({
+            results: repeatedPage ? [] : results,
+            metadata: !repeatedPage && results.length > 0 && hasNextPage ? { page: page + 1, signature } : undefined
+        })
     }
 
     async getSearchTags(): Promise<TagSection[]> {
-        const genres = ['Hentai','Pornhwa','Mature','Smut','Ecchi','Harem','Yuri',"Boy's Love"]
+        const $ = await this.html('/nsfw/catalog')
+        const options = (knownValue: string) => $('select').filter((_, select) =>
+            $('option', select).filter((_, option) => $(option).attr('value') === knownValue).length > 0
+        ).first().find('option').map((_, element) => ({
+            value: $(element).attr('value') ?? '', label: $(element).text().trim()
+        })).get().filter(option => option.value)
+        const types = options('manga')
+        const genres = options('Hentai')
+        const statuses = options('ongoing')
+        const sorts = options('popular')
         return [
-            App.createTagSection({ id: 'genres', label: 'Genres NSFW', tags: genres.map(label => App.createTag({ id: `genre=${label}`, label })) }),
-            App.createTagSection({ id: 'status', label: 'Statut', tags: ['En cours','Terminé'].map(label => App.createTag({ id: `status=${label}`, label })) }),
-            App.createTagSection({ id: 'sort', label: 'Tri', tags: [
-                App.createTag({ id: 'sort=updated', label: 'Dernière mise à jour' }), App.createTag({ id: 'sort=title', label: 'A–Z' }),
-                App.createTag({ id: 'sort=views', label: 'Popularité' }), App.createTag({ id: 'sort=rating', label: 'Note' })
-            ] })
+            App.createTagSection({ id: 'types', label: 'Type', tags: types.map(option => App.createTag({ id: `type=${option.value}`, label: option.label })) }),
+            App.createTagSection({ id: 'genres', label: 'Genres NSFW', tags: genres.map(option => App.createTag({ id: `genre=${option.value}`, label: option.label })) }),
+            App.createTagSection({ id: 'status', label: 'Statut', tags: statuses.map(option => App.createTag({ id: `status=${option.value}`, label: option.label })) }),
+            App.createTagSection({ id: 'sort', label: 'Tri', tags: sorts.map(option => App.createTag({ id: `sort=${option.value}`, label: option.label })) }),
+            App.createTagSection({ id: 'chapters', label: 'Chapitres minimum', tags: [10, 25, 50, 100, 200].map(value => App.createTag({ id: `minChapters=${value}`, label: `${value}+ chapitres` })) })
         ]
     }
 
@@ -137,6 +158,10 @@ export class ScansFRNSFW implements MangaProviding, ChapterProviding, SearchResu
             callback(section)
         }
     }
-    async getViewMoreItems(id: string, metadata: any): Promise<PagedResults> { return this.getSearchResults({ title: '', includedTags: [{ id: `sort=${id}`, label: id }], excludedTags: [], parameters: {} }, metadata) }
+    async getViewMoreItems(id: string, metadata: any): Promise<PagedResults> {
+        const sortBySection: Record<string, string> = { views: 'popular', featured: 'popular', latest: 'latest', updated: 'updated' }
+        const sort = sortBySection[id] ?? 'popular'
+        return this.getSearchResults({ title: '', includedTags: [{ id: `sort=${sort}`, label: sort }], excludedTags: [], parameters: {} }, metadata)
+    }
     async getCloudflareBypassRequestAsync(): Promise<Request> { return App.createRequest({ url: `${DOMAIN}/nsfw`, method: 'GET', headers: { Cookie: COOKIE } }) }
 }
